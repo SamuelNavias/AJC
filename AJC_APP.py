@@ -101,9 +101,48 @@ if uploaded_file:
     if account_filter != "All":
         filtered_table = filtered_table[filtered_table["Account"] == account_filter]
 
-    # --- Display Table
+    # --- Display Main Table
     html_table = render_html_table(filtered_table)
     st.markdown(html_table, unsafe_allow_html=True)
+
+    # --- Pivot Table (Totals Summary) ---
+    st.title("📈 Yearly Donation Totals")
+
+    # User threshold input
+    threshold = st.number_input("Minimum Donation Threshold", min_value=0, value=2500, step=100)
+
+    # Build pivot table
+    pivot_df = full_table[full_table["Is Total"]].pivot_table(
+        index="Name", columns="Sheet", values="Moneys", aggfunc="sum", fill_value=0
+    )
+
+    # Reorder columns: most recent year first
+    try:
+        pivot_df = pivot_df[sorted(
+            pivot_df.columns,
+            key=lambda s: int(s.split("_")[0]),
+            reverse=True
+        )]
+    except Exception:
+        pass
+
+    # Filter donors by threshold
+    filtered_pivot = pivot_df[pivot_df.max(axis=1) >= threshold]
+
+    # Style cells
+    def highlight_cells(val):
+        if val >= threshold:
+            return "background-color: #d4edda;"  # green
+        elif val > 0:
+            return "background-color: #f8d7da;"  # red
+        else:
+            return ""
+
+    styled_pivot = filtered_pivot.style \
+        .format("${:,.0f}") \
+        .applymap(highlight_cells)
+
+    st.dataframe(styled_pivot, use_container_width=True)
 
 else:
     st.info("📂 Upload an Excel file to begin.")
