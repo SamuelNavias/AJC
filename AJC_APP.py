@@ -18,7 +18,7 @@ def render_html_table(df):
     <tbody>
     """
     for _, row in df.iterrows():
-        bg = "background-color:#fff8b3;" if row["Is Total"] else ""
+        bg = "background-color:#fff8b3;" if row.get("Is Total", False) else ""
         html += f"<tr style='{bg}'>"
         html += f"<td style='padding:8px; border-bottom:1px solid #eee;'>{row['Name']}</td>"
         html += f"<td style='padding:8px; border-bottom:1px solid #eee;'>{row['Account']}</td>"
@@ -46,7 +46,7 @@ def preprocess_and_combine(df):
     df["Name"] = df["Name"].ffill()
     df["Is Total"] = df["Name"].astype(str).str.strip().str.startswith("Total ")
     df["Moneys"] = df["Amount"].combine_first(df["Credit"])
-    df["Account"] = df["Account"].str.replace(r"^\d+\s*∑\s*", "", regex=True)
+    df["Account"] = df["Account"].str.replace(r"^\d+\s*\u2211\s*", "", regex=True)
 
     df_total = df[df["Is Total"]]
     df_non_total = df[~df["Is Total"]]
@@ -66,7 +66,32 @@ def preprocess_and_combine(df):
                 combined_rows.append(total)
     full_table = pd.concat(combined_rows, ignore_index=True)
 
-    return final, final_total, full_table
+    return final, final_total, full_table, df.copy()
+
+# --- Lapsed Donor Detection ---
+@st.cache_data
+def find_lapsed_donors(df, filter_year=None, min_last_amount=0):
+    pivot = df[df["Is Total"]].pivot_table(index="Name", columns="Sheet", values="Moneys", aggfunc="sum", fill_value=0)
+    pivot = pivot.sort_index(axis=1)
+    lapsed = []
+    for name, row in pivot.iterrows():
+        years = row.index
+        gave_years = row[row > 0].index.tolist()
+        if len(gave_years) < len(years):
+            last_year = gave_years[-1]
+            last_amount = row[last_year]
+            subsequent_years = years[years.get_loc(last_year)+1:]
+            missed_years = [y for y in subsequent_years if row[y] == 0]
+            if missed_years and last_amount >= min_last_amount:
+                if not filter_year or last_year == filter_year:
+                    lapsed.append({
+                        "Name": name,
+                        "Last Donation Year": last_year,
+                        "Lapsed In": ", ".join(missed_years),
+                        "Last Year Amount": last_amount,
+                        "Total Given": row.sum()
+                    })
+    return pd.DataFrame(lapsed)
 
 # --- Streamlit Setup ---
 st.set_page_config(page_title="AJC Donations", layout="wide")
@@ -77,7 +102,7 @@ uploaded_file = st.file_uploader("Upload the AJC Excel File", type=["xlsx"])
 if uploaded_file:
     with st.spinner("Processing Excel file..."):
         df = load_all_sheets_as_dataframe(uploaded_file)
-        final, final_total, full_table = preprocess_and_combine(df)
+        final, final_total, full_table, df_with_totals = preprocess_and_combine(df)
 
     # --- Filter Inputs ---
     st.subheader("🔍 Filter Table")
@@ -108,15 +133,12 @@ if uploaded_file:
     # --- Pivot Table (Totals Summary) ---
     st.title("📈 Yearly Donation Totals")
 
-    # User threshold input
     threshold = st.number_input("Minimum Donation Threshold", min_value=0, value=2500, step=100)
 
-    # Build pivot table
     pivot_df = full_table[full_table["Is Total"]].pivot_table(
         index="Name", columns="Sheet", values="Moneys", aggfunc="sum", fill_value=0
     )
 
-    # Reorder columns: most recent year first
     try:
         pivot_df = pivot_df[sorted(
             pivot_df.columns,
@@ -126,15 +148,13 @@ if uploaded_file:
     except Exception:
         pass
 
-    # Filter donors by threshold
     filtered_pivot = pivot_df[pivot_df.max(axis=1) >= threshold]
 
-    # Style cells
     def highlight_cells(val):
         if val >= threshold:
-            return "background-color: #d4edda;"  # green
+            return "background-color: #d4edda;"
         elif val > 0:
-            return "background-color: #f8d7da;"  # red
+            return "background-color: #f8d7da;"
         else:
             return ""
 
@@ -143,6 +163,25 @@ if uploaded_file:
         .applymap(highlight_cells)
 
     st.dataframe(styled_pivot, use_container_width=True)
+
+    # --- Lapsed Donors Section ---
+    st.title("📉 Donors Who Stopped Donating")
+    st.markdown("View donors who gave in a final year and did not return.")
+
+    all_years = sorted(df_with_totals["Sheet"].dropna().unique())
+    col3, col4 = st.columns(2)
+    with col3:
+        selected_year = st.selectbox("Only Show Donors Whose Last Donation Was In:", ["All"] + all_years)
+    with col4:
+        min_last_amt = st.number_input("Minimum Last Donation Amount", min_value=0, value=2500, step=100)
+
+    filter_year = selected_year if selected_year != "All" else None
+    lapsed_df = find_lapsed_donors(df_with_totals, filter_year=filter_year, min_last_amount=min_last_amt)
+
+    if not lapsed_df.empty:
+        st.dataframe(lapsed_df, use_container_width=True)
+    else:
+        st.info("No lapsed donors detected based on the current filters.")
 
 else:
     st.info("📂 Upload an Excel file to begin.")
