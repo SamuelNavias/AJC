@@ -71,26 +71,43 @@ def preprocess_and_combine(df):
 # --- Lapsed Donor Detection ---
 @st.cache_data
 def find_lapsed_donors(df, filter_year=None, min_last_amount=0):
-    pivot = df[df["Is Total"]].pivot_table(index="Name", columns="Sheet", values="Moneys", aggfunc="sum", fill_value=0)
-    pivot = pivot.sort_index(axis=1)
+    pivot = (
+        df[df["Is Total"]]              # only the “Total …” rows
+        .pivot_table(index="Name",
+                     columns="Sheet",
+                     values="Moneys",
+                     aggfunc="sum",
+                     fill_value=0)
+        .sort_index(axis=1)
+    )
+
     lapsed = []
+
     for name, row in pivot.iterrows():
         years = row.index
         gave_years = row[row > 0].index.tolist()
-        if len(gave_years) < len(years):
-            last_year = gave_years[-1]
-            last_amount = row[last_year]
-            subsequent_years = years[years.get_loc(last_year)+1:]
-            missed_years = [y for y in subsequent_years if row[y] == 0]
-            if missed_years and last_amount >= min_last_amount:
-                if not filter_year or last_year == filter_year:
-                    lapsed.append({
-                        "Name": name,
-                        "Last Donation Year": last_year,
-                        "Lapsed In": ", ".join(missed_years),
-                        "Last Year Amount": last_amount,
-                        "Total Given": row.sum()
-                    })
+
+        # ---------- safeguard ----------
+        if not gave_years:
+            # Donor has no positive totals at all → skip
+            continue
+        # --------------------------------
+
+        last_year     = gave_years[-1]
+        last_amount   = row[last_year]
+        subsequent    = years[years.get_loc(last_year) + 1 :]
+        missed_years  = [y for y in subsequent if row[y] == 0]
+
+        if missed_years and last_amount >= min_last_amount:
+            if (filter_year is None) or (last_year == filter_year):
+                lapsed.append({
+                    "Name":            name,
+                    "Last Donation Year": last_year,
+                    "Lapsed In":       ", ".join(missed_years),
+                    "Last Year Amount": last_amount,
+                    "Total Given":     row.sum(),
+                })
+
     return pd.DataFrame(lapsed)
 
 # --- Streamlit Setup ---
@@ -163,6 +180,43 @@ if uploaded_file:
         .applymap(highlight_cells)
 
     st.dataframe(styled_pivot, use_container_width=True)
+
+        # ───── Year‑over‑Year change table ─────
+    st.header("📊 Year‑over‑Year Donation Change")
+
+    # Ensure chronological order (oldest → newest) for diff calculation
+    chrono_cols = sorted(
+        pivot_df.columns,
+        key=lambda s: int(s.split("_")[0])
+    )
+    chrono_piv = pivot_df[chrono_cols]
+
+    # Compute absolute change vs previous year
+    diff_df = chrono_piv.diff(axis=1)
+
+    # Drop the first (oldest) column of NaNs produced by diff
+    diff_df = diff_df.iloc[:, 1:]
+
+    # Show most‑recent year on the left
+    diff_df = diff_df[diff_df.columns[::-1]]
+
+    # Allow user thresholding on absolute change (optional)
+    change_threshold = st.number_input(
+        "Highlight changes whose magnitude is at least:", value=0, step=1000
+    )
+
+    def delta_color(val):
+        if pd.isna(val):
+            return ""
+        if abs(val) < change_threshold:
+            return ""
+        return "background-color: #d4edda;" if val > 0 else "background-color: #f8d7da;"
+
+    st.dataframe(
+        diff_df.style.format("${:,.0f}").applymap(delta_color),
+        use_container_width=True
+    )
+
 
     # --- Lapsed Donors Section ---
     st.title("📉 Donors Who Stopped Donating")
